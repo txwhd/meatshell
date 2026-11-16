@@ -421,11 +421,12 @@ pub(super) fn move_tab_between_windows(
     move_locked_entry(&src.bufs, &dst.bufs, tab_id);
     move_locked_entry(&src.gates, &dst.gates, tab_id);
     move_locked_entry(&src.statuses, &dst.statuses, tab_id);
-    move_locked_entry(&src.sftp_handles, &dst.sftp_handles, tab_id);
-    move_locked_entry(&src.sftp_last_cwd, &dst.sftp_last_cwd, tab_id);
 
     // Retarget the running pumps at the new window.
     if let Ok(routes) = core.tab_routes.lock() {
+        // Serialize migration with the SFTP bootstrap's route lookup/insertion.
+        move_locked_entry(&src.sftp_handles, &dst.sftp_handles, tab_id);
+        move_locked_entry(&src.sftp_last_cwd, &dst.sftp_last_cwd, tab_id);
         if let Some(route) = routes.get(tab_id) {
             if let Ok(mut r) = route.lock() {
                 *r = TabRoute {

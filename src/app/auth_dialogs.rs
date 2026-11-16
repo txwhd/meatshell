@@ -402,13 +402,8 @@ thread_local! {
     static MFA_QUEUE: RefCell<VecDeque<PendingMfa>> = RefCell::new(VecDeque::new());
 }
 
-/// Queue an MFA prompt: a concurrent connection for the same session *in the
-/// same window* (the shell and its SFTP channel both hitting the prompt at
-/// once) merges into the open dialog so the code is only typed once; otherwise
-/// enqueue (and show it in the owning window if that window has no other MFA
-/// dialog up). We deliberately do NOT cache answers across attempts — a wrong
-/// code must re-prompt on reconnect, not be silently replayed. Cross-window
-/// prompts never merge — each window types its own code (#multi-window).
+/// Queue every MFA challenge separately. Two connections using the same saved
+/// session can require different answers; one-time codes must never be replayed.
 pub(super) fn enqueue_mfa_prompt(
     win: &AppWindow,
     window_id: u64,
@@ -434,14 +429,12 @@ pub(super) fn enqueue_mfa_prompt_scoped(
     echo: bool,
     responder: crate::ssh::MfaResponder,
 ) {
+    prune_closed_mfa_prompts(win, window_id);
+    if responder.is_closed() {
+        return;
+    }
     let show_now = MFA_QUEUE.with(|q| {
         let mut q = q.borrow_mut();
-        if let Some(p) = q.iter_mut().find(|p| {
-            p.window_id == window_id && p.test_id == test_id && p.session_id == session_id
-        }) {
-            p.responders.push(responder);
-            return false;
-        }
         // Per-window turn: show only if this window has no other queued MFA
         // prompt (its oldest entry is the one on screen).
         let show_now = !q.iter().any(|p| p.window_id == window_id);
@@ -459,6 +452,27 @@ pub(super) fn enqueue_mfa_prompt_scoped(
     if show_now {
         show_front_mfa(win, window_id);
     }
+}
+
+/// Drop challenges whose authentication receivers no longer exist. Only clear
+/// the input when this window's displayed challenge was removed.
+pub(super) fn prune_closed_mfa_prompts(win: &AppWindow, window_id: u64) -> bool {
+    let front_removed = MFA_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        let front_removed = q
+            .iter()
+            .find(|p| p.window_id == window_id)
+            .is_some_and(|p| p.responders.iter().all(|r| r.is_closed()));
+        q.retain(|p| p.window_id != window_id || p.responders.iter().any(|r| !r.is_closed()));
+        front_removed
+    });
+    if front_removed {
+        win.set_mfa_answer("".into());
+        win.set_mfa_prompt_is_test(false);
+        win.set_mfa_prompt_open(false);
+        show_front_mfa(win, window_id);
+    }
+    front_removed
 }
 
 /// Populate the MFA dialog from this window's oldest pending prompt and open
@@ -480,6 +494,9 @@ pub(super) fn show_front_mfa(win: &AppWindow, window_id: u64) {
 /// then show that window's next prompt or close its dialog.
 #[allow(dead_code)] // the ui_auth_prompts queue fixture compiles this file without the callback wiring
 pub(super) fn resolve_front_mfa(win: &AppWindow, window_id: u64, accept: bool) {
+    if prune_closed_mfa_prompts(win, window_id) {
+        return; // The clicked dialog belonged to a finished connection.
+    }
     let answer: Option<String> = if accept {
         Some(win.get_mfa_answer().to_string())
     } else {

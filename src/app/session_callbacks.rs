@@ -207,6 +207,8 @@ pub(super) fn wire_session_callbacks(
             // prompt ask for it, Xshell-style.
             w.set_dialog_user("".into());
             w.set_dialog_auth("password".into());
+            w.set_dialog_mfa_profile_id("".into());
+            w.set_dialog_mfa_choice(0);
             set_dialog_credentials(&w, &store_ng.borrow(), "");
             w.set_dialog_password("".into());
             w.set_dialog_key_path("".into());
@@ -465,6 +467,8 @@ pub(super) fn wire_session_callbacks(
                 w.set_dialog_port(session.port.to_string().into());
                 w.set_dialog_user(session.user.clone().into());
                 w.set_dialog_auth(session.auth.as_str().into());
+                w.set_dialog_mfa_profile_id(session.mfa_profile_id.clone().into());
+                super::mfa_manager::refresh(&w, &store);
                 set_dialog_credentials(&w, &store, &session.credential_id);
                 // Start blank; the dialog only loads saved credentials after
                 // opt-in, initially masked. Blank on save still retains them (#10).
@@ -1764,6 +1768,7 @@ pub(super) fn listen_for_config_changes(ctx: &WinCtx, sessions_model: &Rc<VecMod
                 sync_sessions_for_window(&weak, &store.borrow(), &sessions_model);
                 // Custom agents (#427): launch menu and Settings list.
                 w.invoke_refresh_agent_launchers();
+                w.invoke_refresh_mfa();
                 // Terminal colour schemes, then re-apply the theme to the
                 // chrome AND every open terminal buffer (re-renders them).
                 super::terminal_scheme::apply_terminal_schemes(&w, &store.borrow());

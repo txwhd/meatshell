@@ -15,6 +15,12 @@ pub(crate) mod ppk;
 pub(crate) mod proxy;
 #[path = "impls/ssh.rs"]
 mod ssh;
+#[path = "impls/authentication.rs"]
+mod authentication;
+pub(crate) use authentication::{authenticate_credentials, AuthResult};
+#[path = "impls/channels.rs"]
+mod channels;
+pub(crate) use channels::{reply_session_channel, SessionChannelSource};
 #[path = "impls/ssh_config.rs"]
 pub(crate) mod ssh_config;
 #[path = "impls/ssh_cli.rs"]

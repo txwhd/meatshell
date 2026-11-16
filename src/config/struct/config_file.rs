@@ -106,6 +106,8 @@ pub(crate) fn default_quick_panel_height() -> f32 {
 pub struct ConfigFile {
     #[serde(default)]
     pub sessions: Vec<Session>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mfa_profiles: Vec<crate::totp::MfaProfile>,
     /// Saved SSH logins shared by sessions (#526). Secrets are encrypted at
     /// rest like session passwords.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -94,6 +94,7 @@ pub(super) fn apply_session_event_to_window(
             }
         }
         SessionEvent::Closed(reason) => {
+            prune_closed_mfa_prompts(win, window_id);
             // A disconnected tab remains open for Enter-to-reconnect, but it
             // must not retain the old firehose scrollback while idle. Keep the
             // tab, its status, and the currently visible screen; only release

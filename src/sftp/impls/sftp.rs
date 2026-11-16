@@ -1,8 +1,8 @@
 //! SFTP subsystem worker.
 //!
-//! Each terminal tab that spawns an SSH shell also spawns a *separate* SSH
-//! connection for SFTP. This keeps the shell PTY completely unblocked: large
-//! file transfers cannot stall readline or vim.
+//! GUI tabs open SFTP channels on the terminal's authenticated connection.
+//! Automation workers can still own a dedicated SSH connection. File data uses
+//! independent channels and never holds the terminal's transport lock.
 //!
 //! The public API is a simple command channel (`SftpHandle::commands`) that
 //! accepts `SftpCommand` messages. Results and status updates are pushed back
@@ -18,16 +18,17 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
 use russh::client::{self, Handler};
-use russh::keys::key::PrivateKeyWithHashAlg;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use ssh_key::PublicKey;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
-use crate::config::{AuthMethod, Session};
+use crate::config::Session;
+use crate::ssh::{SessionChannelSource, SessionCommand};
 use crate::i18n::t;
 use crate::ssh::{format_mtime, format_size, RemoteEntry, RemoteTreeNode, SessionEvent};
 
@@ -206,11 +207,31 @@ pub fn spawn_sftp(
     jump: Vec<Session>,
     events: UnboundedSender<SessionEvent>,
 ) -> SftpHandle {
+    spawn_sftp_worker(runtime, session, jump, events, None)
+}
+
+/// Reuse this tab's authenticated connection; never prompt for a second login.
+pub fn spawn_sftp_on_terminal(
+    runtime: &tokio::runtime::Handle,
+    session: Session,
+    terminal: UnboundedSender<SessionCommand>,
+    events: UnboundedSender<SessionEvent>,
+) -> SftpHandle {
+    spawn_sftp_worker(runtime, session, Vec::new(), events, Some(terminal))
+}
+
+fn spawn_sftp_worker(
+    runtime: &tokio::runtime::Handle,
+    session: Session,
+    jump: Vec<Session>,
+    events: UnboundedSender<SessionEvent>,
+    terminal: Option<UnboundedSender<SessionCommand>>,
+) -> SftpHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let self_tx = cmd_tx.clone();
     let events_err = events.clone();
     let join = runtime.spawn(crate::ssh::inherit_automation_cancellation(async move {
-        if let Err(err) = run_sftp(session, jump, cmd_rx, self_tx, events).await {
+        if let Err(err) = run_sftp(session, jump, cmd_rx, self_tx, events, terminal).await {
             let _ = events_err.send(SessionEvent::SftpStatus(friendly_sftp_error(&err)));
         }
     }));
@@ -297,6 +318,7 @@ async fn run_sftp(
     mut commands: UnboundedReceiver<SftpCommand>,
     self_tx: UnboundedSender<SftpCommand>,
     events: UnboundedSender<SessionEvent>,
+    terminal: Option<UnboundedSender<SessionCommand>>,
 ) -> Result<()> {
     let _ = events.send(SessionEvent::SftpStatus(
         t("SFTP 连接中...", "SFTP connecting...").into(),
@@ -335,7 +357,19 @@ async fn run_sftp(
     // Keep the jump-host connection alive for the whole SFTP session — the
     // direct-tcpip tunnel rides on it (#211). Declared here so it lives to the
     // end of the function; `_`-prefixed so it isn't flagged unused.
-    let mut _jump_keepalive;
+    let mut _jump_keepalive = Vec::new();
+    let (handle, password) = if let Some(terminal) = terminal {
+        // No credential resolution, authentication, or reconnect in GUI mode.
+        // A password entered at login lives only in the terminal worker. Request
+        // that effective password rather than reverting to an empty saved field.
+        let (reply, received) = tokio::sync::oneshot::channel();
+        terminal.send(SessionCommand::SftpLoginPassword { reply })
+            .map_err(|_| anyhow!("terminal SSH connection is closed"))?;
+        let password = crate::ssh::network_stage("get SFTP login password", async {
+            received.await.map_err(|_| anyhow!("terminal SSH connection is closed"))
+        }).await?;
+        (SftpConnection::Terminal(terminal), password.as_str().to_string())
+    } else {
     // Tunnel through an SSH jump host (#211), the same proxy as the shell (#7),
     // or connect directly.
     let mut handle = match jump.as_slice() {
@@ -372,98 +406,13 @@ async fn run_sftp(
         None => return Err(anyhow!(t("已取消登录", "login cancelled"))),
     };
 
-    // --- Authenticate (same method as the shell session) -------------------
-    let authed = match session.auth {
-        AuthMethod::Password => {
-            let mut ok = crate::ssh::network_stage(
-                &format!(
-                    "SFTP password authentication at {}:{}",
-                    session.host, session.port
-                ),
-                handle.authenticate_password(&user, password.as_str()),
-            )
-            .await?
-            .success();
-            if !ok {
-                // Match the shell session's fallback: russh can hang if a second
-                // auth method is attempted on the same failed handle, so reconnect
-                // before trying keyboard-interactive (#86, #186).
-                crate::ssh::disconnect_ssh(&handle, "authentication fallback").await;
-                handle = match jump.as_slice() {
-                    j if !j.is_empty() => {
-                        let (h, jh) = crate::ssh::connect_target_via_jump(
-                            j,
-                            &session.host,
-                            session.port,
-                            config.clone(),
-                            sftp_handler(&session, &events),
-                            &events,
-                        )
-                        .await
-                        .with_context(|| format!("sftp reconnect {} via jump failed", addr))?;
-                        _jump_keepalive = jh;
-                        h
-                    }
-                    _ => {
-                        _jump_keepalive = Vec::new();
-                        crate::ssh::connect_direct_ssh(
-                            &session,
-                            config.clone(),
-                            sftp_handler(&session, &events),
-                            &events,
-                        )
-                        .await?
-                    }
-                };
-                ok = crate::ssh::keyboard_interactive_auth(
-                    &mut handle,
-                    &user,
-                    password.as_str(),
-                    &session.id,
-                    &session.host,
-                    &events,
-                )
-                .await
-                .context("sftp keyboard-interactive auth failed")?;
-            }
-            ok
-        }
-        AuthMethod::KeyboardInteractive => crate::ssh::keyboard_interactive_auth(
-            &mut handle,
-            &user,
-            password.as_str(),
-            &session.id,
-            &session.host,
-            &events,
-        )
-        .await
-        .context("sftp keyboard-interactive auth failed")?,
-        AuthMethod::Key => {
-            // An encrypted private key needs its passphrase; reuse the session's
-            // password field for it (empty = unencrypted), exactly like the shell
-            // session does — otherwise a passphrase-protected key authenticates the
-            // shell but fails SFTP with "the key is encrypted" (#133).
-            let pass = password.as_str();
-            let keypair = crate::ssh::load_session_private_key(&session, pass)?;
-            let hash = crate::ssh::rsa_hash(&handle, keypair.algorithm().is_rsa()).await;
-            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(keypair), hash);
-            crate::ssh::network_stage(
-                &format!(
-                    "SFTP public-key authentication at {}:{}",
-                    session.host, session.port
-                ),
-                handle.authenticate_publickey(&user, key_with_hash),
-            )
-            .await?
-            .success()
-        }
-        // Its own connection, so the agent signs (and may ask) again (#528).
-        AuthMethod::Agent => crate::ssh::agent_auth(&mut handle, &user, &session, &events).await?,
-    };
-
-    if !authed {
-        return Err(anyhow!(t("SFTP 认证失败", "SFTP authentication failed")));
+    match crate::ssh::authenticate_credentials(&mut handle, &session, &user, &password, &events).await? {
+        crate::ssh::AuthResult::Success => {}
+        crate::ssh::AuthResult::Cancelled => return Err(anyhow!(t("已取消登录", "login cancelled"))),
+        crate::ssh::AuthResult::Failed => return Err(anyhow!(t("SFTP 认证失败", "SFTP authentication failed"))),
     }
+    (SftpConnection::Dedicated(handle), password)
+    };
 
     // --- Decide who SFTP works as (#438) ----------------------------------
     // Login user via the `sftp` subsystem by default; root via sudo, or a
@@ -608,6 +557,7 @@ async fn run_sftp(
         let cmd = tokio::select! {
             command = commands.recv() => match command { Some(command) => command, None => break },
             _ = transfers.join_next(), if !transfers.is_empty() => continue,
+            _ = handle.handle.terminal_closed() => break,
         };
         match cmd {
             SftpCommand::Close => break,
@@ -1694,7 +1644,10 @@ async fn run_sftp(
 
     transfers.abort_all();
     while transfers.join_next().await.is_some() {}
-    crate::ssh::disconnect_ssh(&handle, "bye").await;
+    let _ = sftp.close().await;
+    if let SftpConnection::Dedicated(transport) = &handle.handle {
+        crate::ssh::disconnect_ssh(transport, "bye").await;
+    }
     Ok(())
 }
 
@@ -2115,11 +2068,11 @@ fn sh_quote(s: &str) -> String {
 }
 
 async fn exec_remote_output(
-    handle: &client::Handle<SftpClientHandler>,
+    handle: &SftpConnection,
     cmd: &str,
 ) -> Result<(u32, String)> {
     let mut ch = handle
-        .channel_open_session()
+        .open_session_channel()
         .await
         .context("open owner lookup channel")?;
     ch.exec(true, cmd.as_bytes())
@@ -2820,7 +2773,7 @@ fn parse_owner_lookup_output(output: &str) -> (HashMap<u32, String>, HashMap<u32
 /// IDs this connection has never seen. Returns the entries and whether the
 /// remote lookup produced any new names (i.e. the caller should repaint).
 async fn enrich_entries_with_owners(
-    handle: &client::Handle<SftpClientHandler>,
+    handle: &SftpConnection,
     cache: &SharedOwnerCache,
     mut entries: Vec<RemoteEntry>,
 ) -> (Vec<RemoteEntry>, bool) {
@@ -2859,7 +2812,7 @@ async fn wait_owner_prefetch(ready: &tokio::sync::watch::Receiver<bool>, max: Du
 /// ready before the first paint. On timeout / missing `getent` the cache is
 /// left untouched and later listings fall back to targeted per-ID lookups.
 async fn prefetch_all_owner_names(
-    handle: &client::Handle<SftpClientHandler>,
+    handle: &SftpConnection,
     cache: &SharedOwnerCache,
 ) {
     // No id arguments → getent prints the whole database. `command -v getent
@@ -2888,7 +2841,7 @@ getent passwd 2>/dev/null; printf '\\n--MEATSHELL-GROUPS--\\n'; getent group 2>/
 /// names. Otherwise the first paint leaves owner/group blank (never raw uid/gid)
 /// and a second paint lands once `getent` returns.
 async fn publish_dir_entries(
-    handle: &client::Handle<SftpClientHandler>,
+    handle: &SftpConnection,
     cache: &SharedOwnerCache,
     names_ready: &tokio::sync::watch::Receiver<bool>,
     events: &UnboundedSender<SessionEvent>,
@@ -2924,7 +2877,7 @@ enum OwnerLookup {
 }
 
 async fn resolve_owner_names(
-    handle: &client::Handle<SftpClientHandler>,
+    handle: &SftpConnection,
     uids: &[u32],
     gids: &[u32],
 ) -> OwnerLookup {
@@ -3517,10 +3470,33 @@ struct SftpClientHandler {
     host_key_wait: crate::ssh::HostKeyWait,
 }
 
-/// The SFTP connection plus how its SFTP channels are opened (#438). Derefs to
-/// the SSH handle, so helpers that only run plain commands take it as is.
+enum SftpConnection {
+    Dedicated(client::Handle<SftpClientHandler>),
+    Terminal(UnboundedSender<SessionCommand>),
+}
+
+#[async_trait]
+impl SessionChannelSource for SftpConnection {
+    async fn open_session_channel(&self) -> Result<russh::Channel<client::Msg>> {
+        match self {
+            Self::Dedicated(handle) => handle.open_session_channel().await,
+            Self::Terminal(terminal) => terminal.open_session_channel().await,
+        }
+    }
+}
+
+impl SftpConnection {
+    async fn terminal_closed(&self) {
+        match self {
+            Self::Terminal(terminal) => terminal.closed().await,
+            Self::Dedicated(_) => std::future::pending().await,
+        }
+    }
+}
+
+/// Owns either its own transport or a channel source belonging to this tab.
 struct SftpLink {
-    handle: client::Handle<SftpClientHandler>,
+    handle: SftpConnection,
     elevation: Elevation,
     /// One permit per transfer that may run at once (#554); see
     /// `MAX_PARALLEL_TRANSFERS`. Tokio's semaphore is fair, so files start in
@@ -3536,7 +3512,7 @@ struct SftpLink {
 const MAX_PARALLEL_TRANSFERS: usize = 4;
 
 impl SftpLink {
-    fn new(handle: client::Handle<SftpClientHandler>, elevation: Elevation) -> Self {
+    fn new(handle: SftpConnection, elevation: Elevation) -> Self {
         Self {
             handle,
             elevation,
@@ -3593,7 +3569,7 @@ async fn wait_for_slot(
 }
 
 impl std::ops::Deref for SftpLink {
-    type Target = client::Handle<SftpClientHandler>;
+    type Target = SftpConnection;
 
     fn deref(&self) -> &Self::Target {
         &self.handle

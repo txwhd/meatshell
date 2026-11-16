@@ -120,6 +120,7 @@ impl ConfigStore {
 
         let mut source_ids = HashSet::new();
         for (index, session) in sessions.iter_mut().enumerate() {
+            session.mfa_profile_id.clear(); // Never bind imported data to local MFA entries.
             if session.id.trim().is_empty() || !source_ids.insert(session.id.clone()) {
                 bail!(
                     "import entry {} has an empty or repeated session ID",

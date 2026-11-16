@@ -73,6 +73,14 @@ impl MfaResponder {
         Self(Arc::new(std::sync::Mutex::new(Some(tx))))
     }
 
+    /// Authentication finished or was cancelled before an answer was supplied.
+    pub fn is_closed(&self) -> bool {
+        self.0
+            .lock()
+            .map(|guard| guard.as_ref().is_none_or(|tx| tx.is_closed()))
+            .unwrap_or(true)
+    }
+
     /// Deliver the user's answer (`None` = cancelled). Idempotent.
     pub fn respond(&self, reply: Option<String>) {
         if let Ok(mut guard) = self.0.lock() {

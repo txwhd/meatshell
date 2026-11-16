@@ -1,5 +1,6 @@
 /target
 Cargo.lock
+!tests/ssh_auth_fixture/Cargo.lock
 *.rs.bk
 .DS_Store
 /.vscode

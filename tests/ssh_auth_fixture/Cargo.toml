@@ -1,0 +1,29 @@
+[package]
+name = "meatshell-ssh-auth-regressions"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+tracing = "0.1"
+rand = "0.8"
+async-trait = "0.1"
+futures = "0.3"
+russh = { version = "0.61", default-features = false, features = ["flate2", "ring", "rsa", "des"] }
+russh-sftp = "2"
+serde_json = "1"
+ssh-key = "=0.7.0-rc.10"
+data-encoding = "2"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+zeroize = "1"
+url = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time"] }
+
+[patch.crates-io]
+russh = { path = "../../vendor/russh" }

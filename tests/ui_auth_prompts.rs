@@ -256,3 +256,93 @@ fn cancelled_test_credentials_do_not_poison_next_attempt() {
         assert!(!w.get_cred_prompt_open());
     });
 }
+
+#[test]
+fn concurrent_connections_to_one_session_answer_each_mfa_challenge_separately() {
+    with_ui(|w| {
+        let (first_tx, mut first_rx) = tokio::sync::oneshot::channel();
+        let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+        enqueue_mfa_prompt(
+            &w,
+            1,
+            "same".into(),
+            "host".into(),
+            "OTP:".into(),
+            false,
+            ssh::MfaResponder::new(first_tx),
+        );
+        enqueue_mfa_prompt(
+            &w,
+            1,
+            "same".into(),
+            "host".into(),
+            "Choice:".into(),
+            true,
+            ssh::MfaResponder::new(second_tx),
+        );
+        assert_eq!(w.get_mfa_prompt(), "OTP:");
+        w.set_mfa_answer("111111".into());
+        resolve_front_mfa(&w, 1, true);
+        assert_eq!(first_rx.try_recv(), Ok(Some("111111".into())));
+        assert!(second_rx.try_recv().is_err());
+        assert_eq!(w.get_mfa_prompt(), "Choice:");
+        assert!(w.get_mfa_echo());
+        assert!(w.get_mfa_answer().is_empty());
+        w.set_mfa_answer("approve".into());
+        resolve_front_mfa(&w, 1, true);
+        assert_eq!(second_rx.try_recv(), Ok(Some("approve".into())));
+        assert!(!w.get_mfa_prompt_open());
+    });
+}
+
+#[test]
+fn disconnected_mfa_prompts_clear_without_submitting_to_the_next_connection() {
+    with_ui(|w| {
+        let (stale_tx, stale_rx) = tokio::sync::oneshot::channel();
+        let (live_tx, mut live_rx) = tokio::sync::oneshot::channel();
+        enqueue_mfa_prompt(
+            &w,
+            1,
+            "same".into(),
+            "host".into(),
+            "Old code:".into(),
+            false,
+            ssh::MfaResponder::new(stale_tx),
+        );
+        enqueue_mfa_prompt(
+            &w,
+            1,
+            "same".into(),
+            "host".into(),
+            "New code:".into(),
+            false,
+            ssh::MfaResponder::new(live_tx),
+        );
+        w.set_mfa_answer("stale-answer".into());
+        drop(stale_rx);
+        resolve_front_mfa(&w, 1, true);
+        assert_eq!(w.get_mfa_prompt(), "New code:");
+        assert!(w.get_mfa_answer().is_empty());
+        assert!(live_rx.try_recv().is_err());
+        w.set_mfa_answer("new-answer".into());
+        assert!(!prune_closed_mfa_prompts(&w, 1));
+        assert_eq!(w.get_mfa_answer(), "new-answer");
+        drop(live_rx);
+        assert!(prune_closed_mfa_prompts(&w, 1));
+        assert!(!w.get_mfa_prompt_open());
+        assert!(w.get_mfa_answer().is_empty());
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        enqueue_mfa_prompt(
+            &w,
+            1,
+            "same".into(),
+            "host".into(),
+            "Reconnect:".into(),
+            false,
+            ssh::MfaResponder::new(tx),
+        );
+        assert_eq!(w.get_mfa_prompt(), "Reconnect:");
+        resolve_front_mfa(&w, 1, false);
+        assert_eq!(rx.try_recv(), Ok(None));
+    });
+}

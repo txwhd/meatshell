@@ -5,6 +5,9 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+- **新增 MFA / TOTP 管理与会话引用。** 支持密钥或 otpauth 链接、本机加密保存、动态码和倒计时；明确的 OTP 挑战可自动应答一次，并保留手动输入。密码、私钥和 SSH Agent 后续 MFA 使用同一连接，文件面板复用终端连接以避免重复验证。取消、断线和并发挑战分别处理。
+- **MFA / TOTP management and session references.** Manage encrypted local secrets or otpauth entries with live codes and countdowns; answer explicit OTP challenges once or enter a code manually. Password, private-key and SSH agent logins continue MFA on the same connection, shared with the file panel. Cancellation, disconnects and concurrent challenges are handled separately.
+
 ## [0.8.3] - 2026-11-15
 
 - **新增认证管理，多个会话可共用同一套登录信息（#526）。** 设置 › 认证管理 中保存一次用户名和登录方式（密码 / 键盘交互 / 私钥文件及私钥密码，或 SSH Agent），可编辑、删除，并显示每个认证被多少个会话使用。SSH 会话在编辑窗口中选择认证后，自身的登录字段会隐藏并跟随该认证；修改认证会同步到所有使用它的会话，密码和私钥加密保存且只存一份。删除认证时，相关会话各自保留一份登录信息，不会因此无法连接。导出文件保持独立完整，导入时不会关联本机的认证。

@@ -93,6 +93,7 @@ open /Applications/meatshell.app
     / `~/.config/meatshell/sessions.json`（Linux）
     / `~/Library/Application Support/meatshell/sessions.json`（macOS）
 - [x] SSH（`russh`，纯 Rust）：密码 / 私钥 / 加密私钥（密码短语）
+- [x] MFA / TOTP：设置菜单中的“MFA 管理”支持 Base32 / otpauth 条目、动态码和倒计时；在 SSH 会话中选择条目后，明确的 OTP 挑战会自动应答一次，也可手动输入。密钥在本机加密保存，不随会话导出。终端和文件面板共用已认证连接，避免重复 MFA。
 - [x] SFTP 文件浏览 + 上传 / 下载（拖拽）+ 双栏（本地 / 远程）互传（可拖拽）+ 终端内 ZMODEM（`sz` 下载 / `rz` 多文件上传）
 - [x] SSH 端口转发 / 隧道：本地 -L / 远程 -R / 动态 -D（SOCKS5）
   - 连接后的 Tunnel 面板可新建、停止、重新启动和删除转发；可保存到当前 SSH 会话，并选择下次连接时是否自动启用。

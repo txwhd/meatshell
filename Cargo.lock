@@ -3843,6 +3843,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "argon2 0.5.3",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "block2 0.6.2",
@@ -3850,6 +3851,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "dark-light",
+ "data-encoding",
  "des 0.8.1",
  "directories",
  "encoding_rs",
@@ -5713,8 +5715,6 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.61.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbf893f64684e58da8a68d56a5e84d1cf0440226274c515770fe267707a7d0b0"
 dependencies = [
  "aes 0.9.4",
  "bitflags 2.11.1",

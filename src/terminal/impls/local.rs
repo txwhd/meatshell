@@ -289,6 +289,8 @@ async fn run_local(
                 });
             }
             SessionCommand::AddTunnel { .. }
+            | SessionCommand::OpenSessionChannel { .. }
+            | SessionCommand::SftpLoginPassword { .. }
             | SessionCommand::StopTunnel(_)
             | SessionCommand::StartTunnel(_)
             | SessionCommand::DeleteTunnel(_)

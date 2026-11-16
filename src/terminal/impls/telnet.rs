@@ -342,6 +342,8 @@ async fn run_telnet(
                         let _ = wr.flush().await;
                     }
                     Some(SessionCommand::AddTunnel { .. })
+                    | Some(SessionCommand::OpenSessionChannel { .. })
+                    | Some(SessionCommand::SftpLoginPassword { .. })
                     | Some(SessionCommand::StopTunnel(_))
                     | Some(SessionCommand::StartTunnel(_))
                     | Some(SessionCommand::DeleteTunnel(_))

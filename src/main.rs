@@ -27,6 +27,7 @@ mod resource;
 mod session;
 mod sftp;
 mod ssh;
+mod totp;
 #[cfg(not(feature = "headless"))]
 mod terminal;
 #[cfg(feature = "headless")]

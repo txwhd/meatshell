@@ -1,5 +1,9 @@
 use super::*;
 
+fn route_matches<T>(routes: &std::collections::HashMap<String, Arc<T>>, id: &str, route: &Arc<T>) -> bool {
+    routes.get(id).is_some_and(|current| Arc::ptr_eq(current, route))
+}
+
 /// When a firehose queue contains stale output ahead of its terminal `Closed`
 /// event, keep the close notification and discard the obsolete output. The
 /// disconnected tab is going to be reset anyway; replaying those bytes only
@@ -110,35 +114,42 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
         routes.insert(tab_id.to_string(), route.clone());
     }
 
-    // Separate SFTP connection for the same session (SSH only). It waits for
-    // the interactive PTY to report Connected so a second SSH handshake cannot
-    // contend with terminal startup on the same host/network path.
+    // SFTP uses channels on this tab's authenticated SSH connection. Wait for
+    // the PTY before asking the terminal pump to open the first channel.
     let (sftp_evt_tx, sftp_ready_tx) = if has_sftp {
         let (sftp_tx, sftp_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
         let sftp_runtime = ctx.runtime.clone();
         let sftp_task_runtime = sftp_runtime.clone();
+        let sftp_terminal_tx = terminal_reply_tx.clone();
         // Read the handle map through the route at insertion time: if the tab
         // is dragged to another window while we connect, the route already
         // points at the destination and the handle must land there.
         let sftp_route = route.clone();
+        let sftp_routes = ctx.tab_routes.clone();
         let sftp_tab_id = tab_id.to_string();
         sftp_runtime.spawn(async move {
-            // The interactive PTY may never report Connected (stalled
-            // handshake); bound the wait so this bootstrap task cannot
-            // outlive the tab forever.
-            if !matches!(
-                tokio::time::timeout(std::time::Duration::from_secs(30), ready_rx).await,
-                Ok(Ok(()))
-            ) {
+            // MFA is a human wait and can take longer than 30 seconds. Closing
+            // the shell pump drops ready_tx and cancels this bootstrap instead.
+            if ready_rx.await.is_err() {
                 return;
             }
             tokio::task::yield_now().await;
-            let sftp_handle = spawn_sftp(sftp_task_runtime.handle(), session, jump, sftp_tx);
+            // Check and insert under the route-map lock: an old bootstrap must
+            // never overwrite the worker of a reconnect using the same tab id.
+            let Ok(routes) = sftp_routes.lock() else { return; };
+            if !route_matches(&routes, &sftp_tab_id, &sftp_route) {
+                return;
+            }
+            let sftp_handle = crate::sftp::spawn_sftp_on_terminal(
+                sftp_task_runtime.handle(), session, sftp_terminal_tx, sftp_tx,
+            );
             let handles = sftp_route.lock().ok().map(|r| r.sftp_handles.clone());
             if let Some(handles) = handles {
                 if let Ok(mut handles) = handles.lock() {
-                    handles.insert(sftp_tab_id, sftp_handle);
+                    if let Some(previous) = handles.insert(sftp_tab_id, sftp_handle) {
+                        previous.close();
+                    }
                 }
             }
         });
@@ -378,6 +389,7 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
     // --- SFTP event pump (separate thread, SSH only) ---
     if let Some(sftp_evt_tx) = sftp_evt_tx {
         let route_sftp = route.clone();
+        let routes_sftp = ctx.tab_routes.clone();
         let tab_id_sftp = tab_id.to_string();
         std::thread::spawn(move || {
             let mut sftp_rx = sftp_evt_tx;
@@ -398,11 +410,16 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
                 if ui_batch.is_empty() {
                     continue;
                 }
-                let Ok(rt_s) = route_sftp.lock().map(|g| g.clone()) else {
-                    continue;
-                };
                 let tid = tab_id_sftp.clone();
+                let expected_route = route_sftp.clone();
+                let current_routes = routes_sftp.clone();
                 let _ = slint::invoke_from_event_loop(move || {
+                    if !current_routes.lock().map(|routes| route_matches(&routes, &tid, &expected_route)).unwrap_or(false) {
+                        return;
+                    }
+                    // Resolve after entering the UI loop: a queued batch may
+                    // have moved to another window since it was received.
+                    let Ok(rt_s) = expected_route.lock().map(|g| g.clone()) else { return; };
                     if let (Some(win), Some(editor)) =
                         (rt_s.window.upgrade(), rt_s.editor.upgrade())
                     {
@@ -431,6 +448,22 @@ pub(super) fn start_session_in_tab(tab_id: &str, session: Session, ctx: &Connect
 mod tests {
     use super::should_start_sftp;
     use crate::config::{Session, SessionKind};
+
+    #[test]
+    fn reconnect_rejects_old_sftp_route_but_detach_keeps_identity() {
+        use std::{collections::HashMap, sync::{Arc, Mutex}};
+        let old = Arc::new(Mutex::new(1));
+        let new = Arc::new(Mutex::new(2));
+        let mut routes = HashMap::from([("tab".to_string(), old.clone())]);
+        assert!(super::route_matches(&routes, "tab", &old));
+        *old.lock().unwrap() = 3; // Detach updates the same route in place.
+        assert!(super::route_matches(&routes, "tab", &old));
+        routes.insert("tab".into(), new.clone());
+        assert!(!super::route_matches(&routes, "tab", &old));
+        assert!(super::route_matches(&routes, "tab", &new));
+        routes.remove("tab");
+        assert!(!super::route_matches(&routes, "tab", &new));
+    }
 
     #[test]
     fn shell_compatibility_keeps_sftp_available() {

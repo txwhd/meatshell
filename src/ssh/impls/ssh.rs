@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use russh::client::{self, Handle, Handler, Msg};
-use russh::keys::key::PrivateKeyWithHashAlg;
 use russh::keys::{decode_secret_key, load_secret_key, PrivateKey};
 use russh::{Channel, ChannelId, ChannelMsg, Disconnect};
 use ssh_key::{HashAlg, PublicKey};
@@ -24,6 +23,7 @@ use super::connection::{
 };
 use super::cwd::CwdTracker;
 use super::structs::*;
+use super::authentication::{authenticate_credentials, AuthResult};
 
 struct RuntimeTrigger {
     rule: SessionTrigger,
@@ -1231,11 +1231,7 @@ async fn stop_runtime_forward(
     true
 }
 
-/// Open an SSH transport to the session's host (directly or via a SOCKS5 / HTTP
-/// proxy) and return the russh handle, ready for authentication. Factored out so
-/// the keyboard-interactive fallback can reconnect on a *fresh* handle — russh
-/// hangs if a second auth method is attempted on a handle whose first attempt
-/// already failed (#86).
+/// Open an SSH transport directly, through a proxy, or through a jump chain.
 async fn connect_ssh(
     session: &Session,
     jump: &[Session],
@@ -1317,31 +1313,23 @@ where
     connect_ssh_stream(config, stream, handler, &stage).await
 }
 
-/// Outcome of authenticating an SSH session, so callers can distinguish a user
-/// cancel from a credential rejection and word the status line accordingly.
-pub(crate) enum AuthResult {
-    Success,
-    Cancelled,
-    Failed,
-}
-
-/// Authenticate an already-connected SSH handle using the session's method,
-/// prompting for missing credentials and supporting explicit / fallback
-/// `keyboard-interactive` auth (#86, #249). Shared by the shell, SFTP and
-/// jump-host paths. On the keyboard-interactive fallback it reconnects, updating
-/// both `handle` and `jump_handle` in place so the caller keeps the live tunnel.
+/// Resolve missing credentials, then authenticate on the existing transport.
 pub(crate) async fn authenticate_session(
     handle: &mut Handle<ClientHandler>,
-    jump_handle: &mut Vec<Handle<ClientHandler>>,
-    remote_forwards: &mut RemoteForwardMap,
     session: &Session,
-    jump: &[Session],
-    config: Arc<client::Config>,
     events: &UnboundedSender<SessionEvent>,
 ) -> Result<AuthResult> {
+    Ok(authenticate_session_with_password(handle, session, events).await?.0)
+}
+
+async fn authenticate_session_with_password(
+    handle: &mut Handle<ClientHandler>,
+    session: &Session,
+    events: &UnboundedSender<SessionEvent>,
+) -> Result<(AuthResult, crate::config::Secret)> {
     let (user, password) = match resolve_credentials(session, events).await {
         Some(c) => c,
-        None => return Ok(AuthResult::Cancelled),
+        None => return Ok((AuthResult::Cancelled, crate::config::Secret::default())),
     };
 
     let _ = events.send(SessionEvent::Status(format!(
@@ -1352,69 +1340,13 @@ pub(crate) async fn authenticate_session(
         session.port
     )));
 
-    let authed = match session.auth {
-        AuthMethod::Password => {
-            let mut ok = network_stage(
-                &format!("password authentication at {}:{}", session.host, session.port),
-                handle.authenticate_password(&user, password.as_str()),
-            )
-            .await?
-            .success();
-            if !ok {
-                // russh can't switch auth methods on a handle whose first attempt
-                // already failed (it hangs), so reconnect on a fresh handle before
-                // trying keyboard-interactive (#86).
-                disconnect_ssh(handle, "authentication fallback").await;
-                let (h, jh, targets) =
-                    Box::pin(connect_ssh(session, jump, config.clone(), events)).await?;
-                *handle = h;
-                *jump_handle = jh;
-                *remote_forwards = targets;
-                ok = keyboard_interactive_auth(
-                    handle,
-                    &user,
-                    password.as_str(),
-                    &session.id,
-                    &session.host,
-                    events,
-                )
-                .await
-                .context("keyboard-interactive auth failed")?;
-            }
-            ok
-        }
-        AuthMethod::KeyboardInteractive => keyboard_interactive_auth(
-            handle,
-            &user,
-            password.as_str(),
-            &session.id,
-            &session.host,
-            events,
-        )
-        .await
-        .context("keyboard-interactive auth failed")?,
-        AuthMethod::Key => {
-            // An encrypted private key needs its passphrase; we reuse the
-            // session's password field for it (empty = unencrypted key) (#90).
-            let pass = password.as_str();
-            let keypair = load_session_private_key(session, pass)?;
-            let hash = rsa_hash(handle, keypair.algorithm().is_rsa()).await;
-            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(keypair), hash);
-            network_stage(
-                &format!("public-key authentication at {}:{}", session.host, session.port),
-                handle.authenticate_publickey(&user, key_with_hash),
-            )
-            .await?
-            .success()
-        }
-        AuthMethod::Agent => agent_auth(handle, &user, session, events).await?,
-    };
-
-    if authed {
-        Ok(AuthResult::Success)
+    let result = authenticate_credentials(handle, session, &user, &password, events).await?;
+    let sudo_password = if result == AuthResult::Success && matches!(session.auth, AuthMethod::Password | AuthMethod::KeyboardInteractive) {
+        crate::config::Secret::new(password)
     } else {
-        Ok(AuthResult::Failed)
-    }
+        crate::config::Secret::default()
+    };
+    Ok((result, sudo_password))
 }
 
 /// Log in with keys held by the user's SSH agent (#528); see `agent::login`.
@@ -1457,24 +1389,13 @@ where
     H::Error: std::error::Error + Send + Sync + 'static,
 {
     let (jump, ancestors) = chain.split_first().context("empty SSH jump chain")?;
-    // Connect to this hop through its ancestors. Keep every transport alive,
-    // including replacement transports created by keyboard-interactive fallback.
+    // Connect to this hop through its ancestors and keep every transport alive.
     // `Box::pin` breaks the async recursion (connect_ssh → jump → connect_ssh).
-    let (mut jhandle, mut ancestors_alive, mut jump_forwards) =
+    let (mut jhandle, mut ancestors_alive, _jump_forwards) =
         Box::pin(connect_ssh(jump, ancestors, config.clone(), events))
             .await
             .with_context(|| format!("connect jump host {}:{} failed", jump.host, jump.port))?;
-    match authenticate_session(
-        &mut jhandle,
-        &mut ancestors_alive,
-        &mut jump_forwards,
-        jump,
-        ancestors,
-        config.clone(),
-        events,
-    )
-    .await?
-    {
+    match authenticate_session(&mut jhandle, jump, events).await? {
         AuthResult::Success => {}
         AuthResult::Cancelled => {
             return Err(anyhow!(t("跳板机登录已取消", "jump host login cancelled")))
@@ -1639,19 +1560,10 @@ pub async fn test_session_auth(
     events: UnboundedSender<SessionEvent>,
 ) -> Result<()> {
     let config = ssh_client_config();
-    let (mut handle, mut jump_handle, mut remote_forwards) =
+    let (mut handle, jump_handle, _remote_forwards) =
         connect_ssh(&session, &jump, config.clone(), &events).await?;
 
-    let auth = authenticate_session(
-        &mut handle,
-        &mut jump_handle,
-        &mut remote_forwards,
-        &session,
-        &jump,
-        config,
-        &events,
-    )
-    .await?;
+    let auth = authenticate_session(&mut handle, &session, &events).await?;
 
     let result = match auth {
         AuthResult::Success => Ok(()),
@@ -1721,20 +1633,10 @@ async fn execute_command_inner(
     let (events, event_rx) = mpsc::unbounded_channel();
     drop(event_rx);
     let config = ssh_client_config();
-    let (mut handle, mut jump_handle, mut remote_forwards) =
+    let (mut handle, jump_handle, _remote_forwards) =
         connect_ssh(&session, &jump, config.clone(), &events).await?;
 
-    match authenticate_session(
-        &mut handle,
-        &mut jump_handle,
-        &mut remote_forwards,
-        &session,
-        &jump,
-        config,
-        &events,
-    )
-    .await?
-    {
+    match authenticate_session(&mut handle, &session, &events).await? {
         AuthResult::Success => {}
         AuthResult::Cancelled => return Err(anyhow!("login cancelled")),
         AuthResult::Failed => return Err(anyhow!("authentication failed")),
@@ -1825,7 +1727,7 @@ async fn run_session(
 
     let config = ssh_client_config();
 
-    let (mut handle, mut jump_handle, mut remote_forwards) =
+    let (mut handle, jump_handle, remote_forwards) =
         connect_ssh(&session, &jump, config.clone(), &events).await?;
     tracing::info!(
         "[SESSION_START] id={} stage=transport-ready elapsed_ms={}",
@@ -1834,20 +1736,9 @@ async fn run_session(
     );
 
     // --- Auth (shared with SFTP + jump-host paths) ---------------------
-    // Try plain `password` first, then `keyboard-interactive` on a fresh handle —
-    // many bastions (JumpServer) disable `password` (#86). Missing credentials
-    // are prompted for (#110).
-    match authenticate_session(
-        &mut handle,
-        &mut jump_handle,
-        &mut remote_forwards,
-        &session,
-        &jump,
-        config.clone(),
-        &events,
-    )
-    .await?
-    {
+    // Keep first-factor progress on this transport when continuing MFA.
+    let (auth, sftp_login_password) = authenticate_session_with_password(&mut handle, &session, &events).await?;
+    match auth {
         AuthResult::Success => {}
         AuthResult::Cancelled => {
             let _ = events.send(SessionEvent::Closed(
@@ -2191,6 +2082,12 @@ async fn run_session(
             }
             cmd = commands.recv() => {
                 match cmd {
+                    Some(SessionCommand::OpenSessionChannel { reply }) => {
+                        crate::ssh::reply_session_channel(&handle, reply).await;
+                    }
+                    Some(SessionCommand::SftpLoginPassword { reply }) => {
+                        let _ = reply.send(sftp_login_password.clone());
+                    }
                     Some(SessionCommand::RawInput(bytes)) => {
                         // Only log the byte count — never the bytes themselves,
                         // which are raw keystrokes and may contain passwords (#15).
@@ -3134,111 +3031,6 @@ fn parse_net_dev_line(line: &str) -> Option<(String, (u64, u64))> {
     Some((iface.to_string(), (nums[0], nums[8])))
 }
 
-/// True if a keyboard-interactive prompt is asking for a second factor (an MFA /
-/// OTP / verification code) rather than the account password. We answer password
-/// challenges automatically with the stored password but must ask the user for
-/// these (#86-MFA). Heuristic over the common English/Chinese wordings used by
-/// JumpServer, Google Authenticator (PAM), Duo, etc.
-fn looks_like_mfa(prompt: &str) -> bool {
-    let t = prompt.to_lowercase();
-    t.contains("code")
-        || t.contains("otp")
-        || t.contains("mfa")
-        || t.contains("2fa")
-        || t.contains("factor") // two-factor / second factor
-        || t.contains("duo")
-        || t.contains("verification")
-        || t.contains("verify")
-        || t.contains("token")
-        || t.contains("authenticator")
-        || t.contains("passcode")
-        || t.contains("one-time")
-        || t.contains("one time")
-        || t.contains("验证码")
-        || t.contains("动态")
-        || t.contains("令牌")
-}
-
-/// Authenticate via `keyboard-interactive`. The stored password answers the
-/// first password challenge automatically (the JumpServer-style bastions that
-/// disable the plain `password` method, #86); any *other* challenge — an MFA /
-/// verification-code prompt — is shown to the user, whose typed answer is sent
-/// back. This is what makes MFA-enabled bastions (JumpServer with MFA forced on)
-/// work (#86-MFA).
-pub(crate) async fn keyboard_interactive_auth<H>(
-    handle: &mut Handle<H>,
-    user: &str,
-    password: &str,
-    session_id: &str,
-    host: &str,
-    events: &UnboundedSender<SessionEvent>,
-) -> Result<bool>
-where
-    H: Handler + 'static,
-    H::Error: std::error::Error + Send + Sync + 'static,
-{
-    use russh::client::KeyboardInteractiveAuthResponse as Kb;
-    let stage = format!("keyboard-interactive authentication at {host}");
-    let mut res = network_stage(
-        &stage,
-        handle.authenticate_keyboard_interactive_start(user.to_string(), None),
-    )
-    .await?;
-    let mut password_used = false;
-    // Bound the exchange so a misbehaving server can't loop us forever.
-    for _ in 0..16 {
-        match res {
-            Kb::Success => return Ok(true),
-            Kb::Failure { .. } => return Ok(false),
-            Kb::InfoRequest { prompts, .. } => {
-                let mut responses = Vec::with_capacity(prompts.len());
-                for p in &prompts {
-                    // Use the stored password for the first password-like
-                    // challenge; ask the user for everything else (MFA codes).
-                    if !password_used && !password.is_empty() && !looks_like_mfa(&p.prompt) {
-                        responses.push(password.to_string());
-                        password_used = true;
-                    } else {
-                        match ask_mfa_prompt(session_id, host, &p.prompt, p.echo, events).await {
-                            Some(answer) => responses.push(answer),
-                            None => return Ok(false), // user cancelled
-                        }
-                    }
-                }
-                res = network_stage(
-                    &stage,
-                    handle.authenticate_keyboard_interactive_respond(responses),
-                )
-                .await?;
-            }
-        }
-    }
-    Ok(false)
-}
-
-/// Ask the UI for a single keyboard-interactive answer (an MFA / verification
-/// code), blocking until the user responds. `None` = cancelled or no UI (#86-MFA).
-async fn ask_mfa_prompt(
-    session_id: &str,
-    host: &str,
-    prompt: &str,
-    echo: bool,
-    events: &UnboundedSender<SessionEvent>,
-) -> Option<String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let sent = events.send(SessionEvent::MfaPrompt {
-        session_id: session_id.to_string(),
-        host: host.to_string(),
-        prompt: prompt.to_string(),
-        echo,
-        responder: MfaResponder::new(tx),
-    });
-    if sent.is_err() {
-        return None; // no UI to ask
-    }
-    rx.await.ok().flatten()
-}
-
 /// Client handler. Verifies the server host key against the known_hosts store,
 /// prompting the user on first contact / on a changed key (#109-5).
 ///
@@ -4064,44 +3856,6 @@ mod process_control_tests {
         assert!(safe.contains("[REDACTED]"));
         assert!(!safe.contains('\r'));
         assert!(!safe.contains('\n'));
-    }
-}
-
-#[cfg(test)]
-mod mfa_tests {
-    use super::looks_like_mfa;
-
-    #[test]
-    fn password_prompts_are_not_mfa() {
-        // These should be answered automatically with the stored password.
-        for p in [
-            "Password: ",
-            "password:",
-            "jeff@host's password:",
-            "请输入密码:",
-            "Password for jeff:",
-        ] {
-            assert!(!looks_like_mfa(p), "wrongly flagged as MFA: {p:?}");
-        }
-    }
-
-    #[test]
-    fn verification_code_prompts_are_mfa() {
-        // These must prompt the user (JumpServer / Google Authenticator / Duo …).
-        for p in [
-            "MFA code: ",
-            "[MFA] Please enter 6 digit code: ",
-            "Verification code: ",
-            "Verification code (from your authenticator app): ",
-            "One-time password (OATH-TOTP): ",
-            "Enter passcode or select one of the following options:",
-            "Duo two-factor login",
-            "请输入验证码:",
-            "动态口令:",
-            "请输入令牌:",
-        ] {
-            assert!(looks_like_mfa(p), "missed an MFA prompt: {p:?}");
-        }
     }
 }
 

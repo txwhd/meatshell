@@ -218,6 +218,8 @@ pub(crate) async fn login<H: russh::client::Handler>(
         })?;
         match attempt {
             Ok(result) if result.success() => return Ok(true),
+            // Continue MFA after this accepted key instead of offering more keys.
+            Ok(russh::client::AuthResult::Failure { partial_success: true, .. }) => return Ok(false),
             Ok(_) => continue,
             Err(AgentSignError::Agent(error)) => return Err(error),
             Err(AgentSignError::Send) => bail!("the SSH connection closed during login"),
@@ -569,9 +571,7 @@ mod tests {
 
     /// The 2048-bit RSA fixture shared with the key-format tests.
     fn rsa_private() -> ssh_key::PrivateKey {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/ssh/impls/testdata/keys/rsa_openssh");
-        russh::keys::load_secret_key(path, None).unwrap()
+        russh::keys::decode_secret_key(include_str!("testdata/keys/rsa_openssh"), None).unwrap()
     }
 
     /// Log in to a server trusting `trusted` with an agent holding `keys`.

@@ -20,6 +20,8 @@ import { TabBar, TabInfo, LaunchItem } from "tabs.slint";
 import { Welcome, SessionInfo } from "welcome.slint";
 import { SessionDialog, SessionDraft, PortFwd, TriggerDraft, JumpHop } from "session_dialog.slint";
 import { ConfirmDialog } from "confirm_dialog.slint";
+import { MfaManager, MfaEntryInfo } from "mfa_manager.slint";
+export { MfaEntryInfo }
 import { ModalLayer, ModalKind } from "modal.slint";
 import { LabeledInput, PrimaryButton, GhostButton, DockExpandButton, IconButton, ToolStrip } from "widgets.slint";
 import { TerminalView, TermSpan, TermMatch, FindStatus, QuickCmd, QuickDockPanel } from "terminal_view.slint";
@@ -981,6 +983,26 @@ export component AppWindow inherits Window {
     in-out property <string> mfa-answer;           // the entered code
     callback mfa-submit();                         // send the entered answer
     callback mfa-cancel();                         // cancel the connection
+    in-out property <bool> mfa-manager-open: false;
+    in property <[MfaEntryInfo]> mfa-entries;
+    in property <[string]> mfa-choices;
+    in property <[string]> mfa-ids;
+    in-out property <string> mfa-selected-id;
+    in-out property <string> mfa-entry-name;
+    in-out property <string> mfa-secret-input;
+    in-out property <string> mfa-algorithm: "SHA1";
+    in-out property <string> mfa-digits: "6";
+    in-out property <string> mfa-period: "30";
+    in-out property <string> mfa-message;
+    in-out property <int> mfa-prompt-choice: 0;
+    callback open-mfa-manager();
+    callback refresh-mfa();
+    callback mfa-new-entry();
+    callback mfa-select-entry(string);
+    callback mfa-save-entry();
+    callback mfa-delete-entry();
+    callback mfa-copy-code(string);
+    callback mfa-fill-code();
     // Group create / rename dialog (#41).
     in-out property <bool> group-dialog-open: false;
     in-out property <string> group-dialog-orig;    // "" = create, else rename
@@ -1188,6 +1210,8 @@ export component AppWindow inherits Window {
     in-out property <string> dialog-port: "22";
     in-out property <string> dialog-user;
     in-out property <string> dialog-auth: "password";
+    in-out property <string> dialog-mfa-profile-id;
+    in-out property <int> dialog-mfa-choice: 0;
     in-out property <string> dialog-password;
     in-out property <string> dialog-key-path;
     in-out property <string> dialog-key-inline;
@@ -1262,6 +1286,7 @@ export component AppWindow inherits Window {
         root.mfa-prompt-open ? ModalKind.mfa :
         root.cred-prompt-open ? ModalKind.credentials :
         root.hostkey-prompt-open ? ModalKind.host-key :
+        root.mfa-manager-open ? ModalKind.mfa-manager :
         root.confirm-delete-open ? ModalKind.delete-confirm :
         root.paste-confirm-open ? ModalKind.paste-confirm :
         root.qcg-open ? ModalKind.command-group :
@@ -3583,6 +3608,20 @@ export component AppWindow inherits Window {
                            vertical-alignment: center; horizontal-stretch: 1; }
                 }
             }
+            Rectangle {
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: mfa-menu-ta.has-hover ? Theme.bg-hover : transparent;
+                mfa-menu-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.settings-open = false; root.open-mfa-manager(); }
+                }
+                HorizontalLayout {
+                    padding-left: 8px; spacing: 8px;
+                    Text { text: "\u{E897}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                    Text { text: root.lang-en ? "MFA manager" : "MFA 管理"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; horizontal-stretch: 1; }
+                }
+            }
             // Export all connections to a portable file (#46).
             Rectangle {
                 height: 28px;
@@ -4928,6 +4967,11 @@ export component AppWindow inherits Window {
         draft-port <=> root.dialog-port;
         draft-user <=> root.dialog-user;
         draft-auth <=> root.dialog-auth;
+        draft-mfa-profile-id <=> root.dialog-mfa-profile-id;
+        mfa-choice <=> root.dialog-mfa-choice;
+        mfa-choices: root.mfa-choices;
+        mfa-ids: root.mfa-ids;
+        manage-mfa => { root.open-mfa-manager(); }
         draft-password <=> root.dialog-password;
         draft-key-path <=> root.dialog-key-path;
         draft-key-inline <=> root.dialog-key-inline;
@@ -5289,6 +5333,11 @@ export component AppWindow inherits Window {
                     font-size: Theme.fs-sm;
                     wrap: word-wrap;
                 }
+                if root.mfa-choices.length > 1 : HorizontalLayout {
+                    spacing: 8px;
+                    ComboBox { model: root.mfa-choices; current-index <=> root.mfa-prompt-choice; horizontal-stretch: 1; }
+                    GhostButton { text: root.lang-en ? "Fill code" : "填入动态码"; clicked => { root.mfa-fill-code(); } }
+                }
                 code-input := LabeledInput {
                     label: root.lang-en ? "Code" : "验证码";
                     placeholder: "123456";
@@ -5316,6 +5365,27 @@ export component AppWindow inherits Window {
                 }
             }
         }
+    }
+
+    if root.mfa-manager-open : MfaManager {
+        width: parent.width; height: parent.height;
+        is-open: true; is-mac: root.is-mac;
+        covered: root.active-modal != ModalKind.mfa-manager;
+        lang-en: root.lang-en;
+        entries: root.mfa-entries;
+        selected-id <=> root.mfa-selected-id;
+        entry-name <=> root.mfa-entry-name;
+        secret-input <=> root.mfa-secret-input;
+        algorithm <=> root.mfa-algorithm;
+        digits <=> root.mfa-digits;
+        period <=> root.mfa-period;
+        message <=> root.mfa-message;
+        select-entry(id) => { root.mfa-select-entry(id); }
+        new-entry => { root.mfa-new-entry(); }
+        save-entry => { root.mfa-save-entry(); }
+        delete-entry => { root.mfa-delete-entry(); }
+        copy-code(id) => { root.mfa-copy-code(id); }
+        close => { root.mfa-secret-input = ""; root.mfa-manager-open = false; }
     }
 
     // --- Interface settings (modal overlay) -------------------------------

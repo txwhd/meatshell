@@ -180,6 +180,8 @@ async fn run_serial(
             // A serial line has no window size; nothing to propagate.
             SessionCommand::Resize(_, _) => {}
             SessionCommand::AddTunnel { .. }
+            | SessionCommand::OpenSessionChannel { .. }
+            | SessionCommand::SftpLoginPassword { .. }
             | SessionCommand::StopTunnel(_)
             | SessionCommand::StartTunnel(_)
             | SessionCommand::DeleteTunnel(_)

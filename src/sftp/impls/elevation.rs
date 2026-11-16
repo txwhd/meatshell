@@ -16,6 +16,7 @@ use russh::client;
 
 use crate::config::{AuthMethod, Session};
 use crate::i18n::t;
+use crate::ssh::SessionChannelSource;
 
 /// `Session::sftp_mode` values.
 pub(crate) const SFTP_MODE_SUDO: &str = "sudo";
@@ -110,8 +111,8 @@ pub(super) struct Elevation {
 impl Elevation {
     /// Work out how to open SFTP channels for `session`. Fails with a message
     /// for the user when sudo mode cannot work here.
-    pub(super) async fn resolve<H: client::Handler>(
-        handle: &client::Handle<H>,
+    pub(super) async fn resolve(
+        handle: &(impl SessionChannelSource + ?Sized),
         session: &Session,
         password: &str,
     ) -> Result<Self> {
@@ -170,12 +171,12 @@ impl Elevation {
 
     /// Open one SFTP channel and return its byte stream, ready for the SFTP
     /// handshake.
-    pub(super) async fn open_stream<H: client::Handler>(
+    pub(super) async fn open_stream(
         &self,
-        handle: &client::Handle<H>,
+        handle: &(impl SessionChannelSource + ?Sized),
     ) -> Result<russh::ChannelStream<client::Msg>> {
         let channel = handle
-            .channel_open_session()
+            .open_session_channel()
             .await
             .context("open sftp channel")?;
         match &self.server {
@@ -203,9 +204,9 @@ impl Elevation {
 
     /// Run a shell command the panel needs (tar / rm for folder downloads)
     /// with the same privileges as its SFTP channels. Returns the exit status.
-    pub(super) async fn exec_shell<H: client::Handler>(
+    pub(super) async fn exec_shell(
         &self,
-        handle: &client::Handle<H>,
+        handle: &(impl SessionChannelSource + ?Sized),
         cmd: &str,
     ) -> Result<u32> {
         let status = match &self.sudo {
@@ -217,8 +218,8 @@ impl Elevation {
 }
 
 /// Is sudo usable without a password, or with the session's login password?
-async fn detect_sudo<H: client::Handler>(
-    handle: &client::Handle<H>,
+async fn detect_sudo(
+    handle: &(impl SessionChannelSource + ?Sized),
     session: &Session,
     password: &str,
 ) -> Result<Sudo> {
@@ -264,13 +265,13 @@ fn sudo_sftp_server_command(sudo: &Sudo) -> String {
 
 /// Run `cmd` on its own exec channel, optionally feeding `stdin`, and return
 /// its exit status (`None` if the server reported none, e.g. it was killed).
-async fn exec_status<H: client::Handler>(
-    handle: &client::Handle<H>,
+async fn exec_status(
+    handle: &(impl SessionChannelSource + ?Sized),
     cmd: &str,
     stdin: Option<&str>,
 ) -> Result<Option<u32>> {
     let mut channel = handle
-        .channel_open_session()
+        .open_session_channel()
         .await
         .context("open exec channel")?;
     channel

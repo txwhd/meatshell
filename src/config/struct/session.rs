@@ -362,6 +362,9 @@ pub struct Session {
     /// `sudo -u www-data /usr/lib/openssh/sftp-server`.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sftp_command: String,
+    /// Local TOTP entry to use once for an explicit OTP challenge.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mfa_profile_id: String,
     /// Free-form note for this session — somewhere to stash extra info (jump-host
     /// details, credentials hints, owner, etc.). Shown only in the edit dialog.
     /// (B站 suggestion)
@@ -549,6 +552,7 @@ impl Session {
             disable_shell_integration: false,
             sftp_mode: String::new(),
             sftp_command: String::new(),
+            mfa_profile_id: String::new(),
             note: String::new(),
         }
     }

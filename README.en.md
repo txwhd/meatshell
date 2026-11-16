@@ -98,6 +98,7 @@ open /Applications/meatshell.app
     / `~/.config/meatshell/sessions.json` (Linux)
     / `~/Library/Application Support/meatshell/sessions.json` (macOS)
 - [x] SSH (`russh`, pure Rust): password / private key / encrypted key (passphrase)
+- [x] MFA / TOTP: Settings menu → MFA manager supports Base32 / otpauth entries, live codes and countdowns. Bind an entry in an SSH session to answer an explicit OTP challenge once, or enter the code manually. Secrets are encrypted locally and excluded from session exports. The terminal and file panel share one authenticated connection to avoid repeated MFA.
 - [x] SFTP browser + upload / download (drag-and-drop) + split local/remote view (drag between panes) + in-terminal ZMODEM (`sz` download / `rz` multi-file upload)
 - [x] SSH port forwarding / tunnels: local -L / remote -R / dynamic -D (SOCKS5)
   - The connected session's Tunnels panel can add, stop, restart, and delete forwards. Rules can be saved to the SSH session with optional automatic startup on reconnect.

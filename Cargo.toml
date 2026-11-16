@@ -74,6 +74,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 futures = "0.3"
+async-trait = "0.1"
+data-encoding = "2"
 # 0.16.2+ clamps the saved cursor on resize; older versions panic after
 # resizing inside nano/vim and leaving the alternate screen (#490).
 # 0.17+ fixes panics when a resize cuts a wide (CJK/emoji) glyph at the right
@@ -255,6 +257,9 @@ debug = 1
 opt-level = 1
 
 [patch.crates-io]
+# Keep the SSH transport responsive while the user answers MFA challenges.
+# See vendor/russh/MEATSHELL_PATCH.md (based on russh 0.61.2).
+russh = { path = "vendor/russh" }
 # Patched backend (see vendor/EDITOR_PATCH.md): on macOS it never drops its
 # AccessKit adapter, which avoids a Touch Bar crash when a window closes (#488),
 # and on Wayland windows the app never showed stay unmapped. The old macOS

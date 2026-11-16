@@ -661,6 +661,7 @@ pub(super) fn session_from_draft(
         },
         user: draft.user.to_string(),
         auth: AuthMethod::from_str(&draft.auth.to_string()),
+        mfa_profile_id: if kind == SessionKind::Ssh { draft.mfa_profile_id.to_string() } else { String::new() },
         password,
         private_key_path,
         private_key_inline,
@@ -735,6 +736,22 @@ pub(super) fn session_from_draft(
 
 /// Resolution choice meaning "start full screen".
 pub(super) const RDP_RESOLUTION_FULLSCREEN: &str = "fullscreen";
+
+#[cfg(test)]
+mod mfa_reference_tests {
+    use super::*;
+    #[test]
+    fn mfa_reference_survives_draft_conversion_without_changing_saved_credentials() {
+        let mut existing = Session::new_empty();
+        existing.password = Secret::new("fixture-password");
+        let mut draft = SessionDraft { kind:"ssh".into(), mfa_profile_id:"fixture-profile".into(), ..SessionDraft::default() };
+        let result = session_from_draft(&draft, Some(&existing),Vec::new(),Vec::new());
+        assert_eq!(result.mfa_profile_id,"fixture-profile");
+        assert_eq!(result.password.as_str(),"fixture-password");
+        draft.kind="telnet".into();
+        assert!(session_from_draft(&draft,Some(&existing),Vec::new(),Vec::new()).mfa_profile_id.is_empty());
+    }
+}
 /// Resolution choice meaning "use the size typed into the dialog".
 pub(super) const RDP_RESOLUTION_CUSTOM: &str = "custom";
 /// Resolution preselected for a new session: a window that fits most screens,

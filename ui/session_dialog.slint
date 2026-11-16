@@ -38,6 +38,7 @@ export struct SessionDraft {
     port: int,
     user: string,
     auth: string,      // "password" | "key"
+    mfa-profile-id: string,
     password: string,
     private-key-path: string,
     private-key-inline: string,
@@ -785,6 +786,11 @@ export component SessionDialog inherits ModalLayer {
     // Set when Create/Save is pressed with an empty host (SSH/Telnet) (#110).
     in-out property <bool> host-missing: false;
     in-out property <string> draft-auth: "password";
+    in-out property <string> draft-mfa-profile-id;
+    in-out property <int> mfa-choice: 0;
+    in property <[string]> mfa-choices;
+    in property <[string]> mfa-ids;
+    callback manage-mfa();
     in-out property <string> draft-password;
     in-out property <string> draft-key-path;
     in-out property <string> draft-key-inline;
@@ -873,6 +879,7 @@ export component SessionDialog inherits ModalLayer {
     changed draft-port => { root.connection-draft-changed(); root.rdp-preview = ""; }
     changed draft-user => { root.connection-draft-changed(); root.rdp-preview = ""; }
     changed draft-auth => { root.connection-draft-changed(); }
+    changed draft-mfa-profile-id => { root.connection-draft-changed(); }
     changed draft-password => { root.connection-draft-changed(); }
     changed draft-key-path => { root.connection-draft-changed(); }
     changed draft-key-inline => { root.connection-draft-changed(); }
@@ -919,6 +926,7 @@ export component SessionDialog inherits ModalLayer {
             port: root.draft-port.to-float(),
             user: root.draft-user,
             auth: root.draft-auth,
+            mfa-profile-id: root.draft-mfa-profile-id,
             password: root.draft-password,
             private-key-path: root.draft-key-path,
             private-key-inline: root.draft-key-inline,
@@ -1278,6 +1286,21 @@ export component SessionDialog inherits ModalLayer {
                 wrap: word-wrap;
             }
 
+            if root.draft-kind == "ssh" : VerticalLayout {
+                spacing: 4px;
+                Text { text: @tr("MFA / TOTP"); color: Theme.text-secondary; font-size: Theme.fs-sm; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    ComboBox {
+                        model: root.mfa-choices;
+                        current-index <=> root.mfa-choice;
+                        horizontal-stretch: 1;
+                        selected => { root.draft-mfa-profile-id = self.current-index >= 0 && self.current-index < root.mfa-ids.length ? root.mfa-ids[self.current-index] : ""; }
+                    }
+                    GhostButton { text: @tr("MFA 管理"); clicked => { root.manage-mfa(); } }
+                }
+                Text { text: @tr("选择后，明确的 OTP 挑战会自动填码；不引用时手动输入。"); color: Theme.text-muted; font-size: Theme.fs-xs; wrap: word-wrap; }
+            }
             if root.draft-kind == "ssh" && !root.credential-linked && (root.draft-auth == "password" || root.draft-auth == "keyboard-interactive") : LabeledInput {
                 input-background: Theme.bg-elevated;
                 idle-border: Theme.border-strong;

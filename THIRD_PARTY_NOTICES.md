@@ -1,5 +1,12 @@
 # Third-Party Notices
 
+## russh
+
+The vendored SSH client is russh 0.61.2, from https://github.com/Eugeny/russh,
+licensed under Apache-2.0: https://www.apache.org/licenses/LICENSE-2.0.
+Upstream copyright notices are retained in its source files. Local modifications
+keep the transport responsive during MFA; see `vendor/russh/MEATSHELL_PATCH.md`.
+
 ## FreeRDP
 
 The Flatpak bundle ships a build of FreeRDP

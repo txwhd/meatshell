@@ -889,3 +889,12 @@ msgstr "默认编辑器"
 
 msgid "Choose program…"
 msgstr "选择程序…"
+
+msgid "MFA / TOTP"
+msgstr "MFA / TOTP"
+
+msgid "MFA 管理"
+msgstr "MFA 管理"
+
+msgid "选择后，明确的 OTP 挑战会自动填码；不引用时手动输入。"
+msgstr "选择后，明确的 OTP 挑战会自动填码；不引用时手动输入。"

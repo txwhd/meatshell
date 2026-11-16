@@ -28,6 +28,7 @@ mod key_input;
 pub mod launch;
 mod local_shells;
 mod misc_callbacks;
+mod mfa_manager;
 mod open_window;
 mod panes;
 mod port_forward;
@@ -125,7 +126,7 @@ use crate::resource::{LocalSnap, NetHist, TabStatus, TabStatuses};
 use crate::resource::{SystemSampler, SystemSnapshot};
 use crate::session::{ConnectCtx, PendingCred, PendingHostKey, PendingMfa};
 use crate::sftp::{
-    download_target_path, spawn_sftp, DownloadConflict, SftpHandles, SftpLastCwd, UploadConflict,
+    download_target_path, DownloadConflict, SftpHandles, SftpLastCwd, UploadConflict,
 };
 use crate::ssh::{
     format_mtime, format_size, spawn_session, test_session_auth, ProcInfo, SessionCommand,

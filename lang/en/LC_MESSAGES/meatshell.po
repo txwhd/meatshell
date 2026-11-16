@@ -887,3 +887,12 @@ msgstr "Default editor"
 
 msgid "Choose program…"
 msgstr "Choose program…"
+
+msgid "MFA / TOTP"
+msgstr "MFA / TOTP"
+
+msgid "MFA 管理"
+msgstr "MFA manager"
+
+msgid "选择后，明确的 OTP 挑战会自动填码；不引用时手动输入。"
+msgstr "Automatically answer explicit OTP challenges with the selected entry, or use manual input."

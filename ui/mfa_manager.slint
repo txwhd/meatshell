@@ -1,0 +1,111 @@
+import { Theme } from "theme.slint";
+import { ModalLayer } from "modal.slint";
+import { LabeledInput, PrimaryButton, GhostButton } from "widgets.slint";
+import { ComboBox, ScrollView } from "std-widgets.slint";
+
+export struct MfaEntryInfo { id: string, name: string, detail: string, code: string, remaining: string }
+
+export component MfaManager inherits ModalLayer {
+    in property <bool> lang-en;
+    in property <[MfaEntryInfo]> entries;
+    in-out property <string> selected-id;
+    in-out property <string> entry-name;
+    in-out property <string> secret-input;
+    in-out property <string> algorithm: "SHA1";
+    in-out property <string> digits: "6";
+    in-out property <string> period: "30";
+    in-out property <string> message;
+    property <bool> delete-pending: false;
+    callback select-entry(string);
+    callback new-entry();
+    callback save-entry();
+    callback delete-entry();
+    callback copy-code(string);
+    callback close();
+    cancel-requested => { root.close(); }
+    changed selected-id => { root.delete-pending = false; }
+    Rectangle {
+        width: min(760px, parent.width - 32px);
+        height: min(550px, parent.height - 32px);
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.popup-bg;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        TouchArea { }
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+            HorizontalLayout {
+                Text { text: root.lang-en ? "MFA · Authenticator" : "MFA · 动态验证器"; color: Theme.text-primary; font-size: Theme.fs-xl; font-weight: 600; }
+                Rectangle { horizontal-stretch: 1; }
+                GhostButton { text: root.lang-en ? "Close" : "关闭"; clicked => { root.close(); } }
+            }
+            Text { text: root.lang-en ? "Manage TOTP entries and reference them from SSH sessions." : "统一管理 TOTP，供 SSH 会话和验证码弹窗引用。"; color: Theme.text-secondary; font-size: Theme.fs-sm; }
+            HorizontalLayout {
+                spacing: 20px;
+                VerticalLayout {
+                    width: 260px;
+                    spacing: 8px;
+                    GhostButton { text: root.lang-en ? "+ New entry" : "+ 新建 MFA"; clicked => { root.new-entry(); root.delete-pending = false; } }
+                    ScrollView {
+                        VerticalLayout {
+                            spacing: 6px;
+                            if root.entries.length == 0 : Text { text: root.lang-en ? "No MFA entries yet" : "尚未添加 MFA 条目"; color: Theme.text-muted; font-size: Theme.fs-sm; }
+                            for entry in root.entries : Rectangle {
+                                height: 92px;
+                                border-radius: Theme.radius-sm;
+                                background: root.selected-id == entry.id ? Theme.accent.with-alpha(0.12) : Theme.bg-root;
+                                border-width: 1px;
+                                border-color: root.selected-id == entry.id ? Theme.accent : Theme.border-subtle;
+                                TouchArea { clicked => { root.select-entry(entry.id); } }
+                                VerticalLayout {
+                                    padding: 10px; spacing: 3px;
+                                    Text { text: entry.name; color: Theme.text-primary; font-size: Theme.fs-md; font-weight: 600; overflow: elide; }
+                                    HorizontalLayout {
+                                        Text { text: entry.code; color: Theme.accent; font-family: Theme.font-mono; font-size: 22px; font-weight: 600; }
+                                        Rectangle { horizontal-stretch: 1; }
+                                        GhostButton { text: root.lang-en ? "Copy" : "复制"; clicked => { root.copy-code(entry.id); } }
+                                    }
+                                    Text { text: entry.detail + " · " + entry.remaining; color: Theme.text-muted; font-size: Theme.fs-xs; overflow: elide; }
+                                }
+                            }
+                            Rectangle { vertical-stretch: 1; }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    spacing: 10px;
+                    Text { text: root.selected-id == "" ? (root.lang-en ? "New entry" : "新建条目") : (root.lang-en ? "Edit entry" : "编辑条目"); color: Theme.text-primary; font-weight: 600; font-size: Theme.fs-md; }
+                    LabeledInput { label: root.lang-en ? "Name" : "名称"; value <=> root.entry-name; placeholder: root.lang-en ? "Company bastion" : "例如：公司堡垒机"; }
+                    LabeledInput { label: root.lang-en ? "Secret or otpauth URI" : "密钥或 otpauth 链接"; value <=> root.secret-input; password: true; placeholder: root.selected-id == "" ? "Base32 / otpauth://totp/..." : (root.lang-en ? "Leave blank to keep the secret" : "留空保留已有密钥"); }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        VerticalLayout {
+                            Text { text: root.lang-en ? "Algorithm" : "算法"; color: Theme.text-secondary; font-size: Theme.fs-sm; }
+                            ComboBox { model: ["SHA1", "SHA256", "SHA512"]; current-value <=> root.algorithm; }
+                        }
+                        VerticalLayout {
+                            Text { text: root.lang-en ? "Digits" : "位数"; color: Theme.text-secondary; font-size: Theme.fs-sm; }
+                            ComboBox { model: ["6", "8"]; current-value <=> root.digits; }
+                        }
+                    }
+                    LabeledInput { label: root.lang-en ? "Period (seconds)" : "周期（秒）"; value <=> root.period; placeholder: "30"; }
+                    Text { text: root.lang-en ? "Secrets are encrypted locally. URI parameters take precedence." : "密钥在本机加密保存；链接中的参数优先。"; color: Theme.text-muted; wrap: word-wrap; font-size: Theme.fs-xs; }
+                    Text { text: root.message; color: Theme.text-secondary; wrap: word-wrap; font-size: Theme.fs-sm; }
+                    Rectangle { vertical-stretch: 1; }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        if root.selected-id != "" : GhostButton {
+                            text: root.delete-pending ? (root.lang-en ? "Confirm delete" : "确认删除") : (root.lang-en ? "Delete" : "删除");
+                            clicked => { if root.delete-pending { root.delete-entry(); root.delete-pending = false; } else { root.delete-pending = true; root.message = root.lang-en ? "Deleting also clears session references." : "删除后，引用此条目的会话将恢复手动验证码输入。"; } }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        PrimaryButton { text: root.lang-en ? "Save entry" : "保存条目"; clicked => { root.save-entry(); root.delete-pending = false; } }
+                    }
+                }
+            }
+        }
+    }
+}

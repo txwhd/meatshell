@@ -7,6 +7,15 @@ pub enum SessionCommand {
     Resize(u32, u32),
     /// Start or pause periodic local/remote resource monitoring for this session.
     SetResourceMonitoring(bool),
+    /// Open a channel on this already-authenticated terminal connection.
+    /// The caller configures subsystem/exec and owns only the returned channel.
+    OpenSessionChannel {
+        reply: tokio::sync::oneshot::Sender<anyhow::Result<russh::Channel<russh::client::Msg>>>,
+    },
+    /// Runtime login password for SFTP sudo; never a key passphrase or OTP.
+    SftpLoginPassword {
+        reply: tokio::sync::oneshot::Sender<crate::config::Secret>,
+    },
     /// Start a runtime-only SSH tunnel for this connected session (#206).
     AddTunnel {
         id: String,

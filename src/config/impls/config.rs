@@ -464,6 +464,11 @@ impl ConfigStore {
         if let Some(plain) = Self::try_decrypt(key, cfg.webdav_password.as_str()) {
             cfg.webdav_password = Secret::new(plain);
         }
+        for profile in &mut cfg.mfa_profiles {
+            if let Some(plain) = Self::try_decrypt(key, profile.secret.as_str()) {
+                profile.secret = Secret::new(plain);
+            }
+        }
     }
 
     /// Fill every linked session's login from its saved credential (#526).
@@ -726,6 +731,9 @@ impl ConfigStore {
     }
 
     pub fn upsert(&mut self, mut session: Session) {
+        if !self.cache.mfa_profiles.iter().any(|profile| profile.id == session.mfa_profile_id) {
+            session.mfa_profile_id.clear();
+        }
         for forward in &mut session.forwards {
             if forward.id.is_empty() {
                 forward.id = uuid::Uuid::new_v4().to_string();
@@ -2160,6 +2168,11 @@ impl ConfigStore {
             let enc = Self::encrypt(&self.key, disk.webdav_password.as_str())?;
             disk.webdav_password = Secret::new(enc);
         }
+        for profile in &mut disk.mfa_profiles {
+            if !profile.secret.is_empty() && !profile.secret.is_local_ciphertext() {
+                profile.secret = Secret::new(Self::encrypt(&self.key, profile.secret.as_str())?);
+            }
+        }
         let raw = serde_json::to_string_pretty(&disk)?;
         // Write to a sibling temp file then rename — cheap atomicity.
         let tmp = self.path.with_extension("json.tmp");
@@ -2271,6 +2284,7 @@ impl ConfigStore {
             sessions: self.cache.sessions.clone(),
         };
         for s in &mut out.sessions {
+            s.mfa_profile_id.clear(); // Local MFA profiles never enter portable exports.
             // `cache` holds plaintext passwords; obfuscate with the export key.
             if !s.password.is_empty() {
                 let enc = Self::encrypt_export(s.password.as_str())?;
@@ -3328,6 +3342,27 @@ fn read_config_snapshot(path: &Path) -> Result<Option<String>> {
         Ok(raw) => Ok(Some(raw)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err).context("cannot read configuration revision"),
+    }
+}
+
+#[cfg(test)]
+mod mfa_storage_tests {
+    use super::*;
+    #[test]
+    fn mfa_load_decrypts_and_unreadable_ciphertext_survives_an_unrelated_save() {
+        let mut store=tests::temp_store();
+        let profile=crate::totp::MfaProfile::from_input("fixture".into(),"Fixture","JBSWY3DPEHPK3PXP","SHA1",6,30).unwrap();
+        store.put_mfa_profile(profile).unwrap();
+        let raw=fs::read_to_string(&store.path).unwrap();
+        let mut loaded:ConfigFile=serde_json::from_str(&raw).unwrap();
+        ConfigStore::decrypt_local_secrets(&store.key,&mut loaded);
+        assert_eq!(loaded.mfa_profiles[0].secret.as_str(),"JBSWY3DPEHPK3PXP");
+        loaded.mfa_profiles[0].secret=serde_json::from_str("\"enc:v1:unreadable\"").unwrap();
+        store.cache=loaded;
+        store.save().unwrap();
+        let saved:ConfigFile=serde_json::from_str(&fs::read_to_string(&store.path).unwrap()).unwrap();
+        assert_eq!(saved.mfa_profiles[0].secret.as_str(),"enc:v1:unreadable");
+        let _=fs::remove_file(store.path);
     }
 }
 
